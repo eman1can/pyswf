@@ -183,7 +183,7 @@ class SWF(SWFTimelineContainer):
     
     def save(self, file):
         self._header.save(file, self._data)
-        if self._header.compressed():
+        if self._header.compressed:
             output_buffer = BytesIO()
         else:
             output_buffer = file
@@ -194,8 +194,8 @@ class SWF(SWFTimelineContainer):
         
         self.save_tags(self._data, output_buffer)
         
-        if self._header.compressed():
-            if self._header.compressed_zlib():
+        if self._header.compressed:
+            if self._header.compressed_zlib:
                 output_buffer = self.compress_zlib(output_buffer)
             else:
                 output_buffer = self.compress_lzma(output_buffer)
