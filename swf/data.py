@@ -986,15 +986,23 @@ class SWFRecordHeader(_dumb_repr):
 
 class SWFRectangle(_dumb_repr):
     def __init__(self):
+        self._bits = 0
         self.xmin = self.xmax = self.ymin = self.ymax = 0
 
     def parse(self, s):
         s.reset_bits_pending()
-        bits = s.readUB(5)
-        self.xmin = s.readSB(bits)
-        self.xmax = s.readSB(bits)
-        self.ymin = s.readSB(bits)
-        self.ymax = s.readSB(bits)
+        self._bits = s.readUB(5)
+        self.xmin = s.readSB(self._bits)
+        self.xmax = s.readSB(self._bits)
+        self.ymin = s.readSB(self._bits)
+        self.ymax = s.readSB(self._bits)
+    
+    def save(self, f, s):
+        s.writeUB(f, 5, self._bits)
+        s.writeSB(f, self._bits, self.xmin)
+        s.writeSB(f, self._bits, self.xmax)
+        s.writeSB(f, self._bits, self.ymin)
+        s.writeSB(f, self._bits, self.ymax)
 
     @property
     def dimensions(self):

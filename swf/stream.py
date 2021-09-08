@@ -33,7 +33,7 @@ class SWFStream(object):
                 b = b | val if val >= 0 else b | ~val << 1
                 vmax = val if vmax < val else vmax
             else:
-                b |= val;
+                b |= val
         bits = 0
         if b > 0:
             bits = len(self.bin(b)) - 2
@@ -49,9 +49,20 @@ class SWFStream(object):
     def _make_masks(self):
         self._masks = [(1 << x) - 1 for x in range(9)]
     
-    def _read_bytes_aligned(self, bytes):
-        buf = self.f.read(bytes)
+    def _read_bytes_aligned(self, byte_count):
+        buf = self.f.read(byte_count)
         return reduce(lambda x, y: x << 8 | y, buf, 0)
+    
+    def expand(function, sequence, part_count):
+        buf = b''
+        for x in range(part_count):
+            sequence, part = function(sequence)
+            buf = struct.pack('B', part) + buf
+        return buf
+    
+    def _write_bytes_aligned(self, f, byte_count, value):
+        write_bytes = expand(lambda x: (x >> 8, x & 255), value, byte_count)
+        f.write(write_bytes)
     
     def readbits(self, bits):
         """
@@ -103,7 +114,45 @@ class SWFStream(object):
             self._bits_pending = 8
         
         return out
-     
+    
+    def writebits(self, f, bits, value):
+        if bits == 0:
+            return
+        
+        if bits % 8 == 0 and self._bits_pending == 0:
+            return self._write_bytes_aligned(f, bits // 8, value)
+        
+        masks = self._masks
+        
+        def transfer_bits(x, y, n, t):
+            """
+            transfers t bits from the top of y_n to the bottom of x.
+            then returns x and the remaining bits in y
+            """
+            if n == t:
+                # taking all
+                return (x << t) | y, 0
+            
+            mask = masks[t]           # (1 << t) - 1
+            remainmask = masks[n - t] # (1 << n - t) - 1
+            taken = ((y >> n - t) & mask)
+            return (x << t) | taken, y & remainmask
+        
+        while bits > 0: # We have more bits that we need to write
+            if self._bits_pending > 0:  # We have bits that need to be written
+                assert self._partial_byte is not None
+                place = min(self._bits_pending, bits)
+                self._partial_byte, value = transfer_bits(self._partial_byte, value, self._bits_pending, place)
+                
+                if place == self._bits_pending:
+                    # We have placed all bits
+                    f.write(chr(self._partial_byte))
+                    self._bits_pending = 8
+                self._bits_pending -= place
+                bits -= take
+            
+            self._partial_byte = None
+
     def readFB(self, bits):
         """ Read a float using the specified number of bits """
         return float(self.readSB(bits)) / 65536.0
@@ -116,46 +165,71 @@ class SWFStream(object):
     def readUB(self, bits):
         """ Read a unsigned int using the specified number of bits """
         return self.readbits(bits)
+    
+    def writeUB(self, f, bits, value):
+        self.writebits(f, bits, value)
             
     def readSI8(self):
         """ Read a signed byte """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         return struct.unpack('b', self.f.read(1))[0]
             
     def readUI8(self):
         """ Read a unsigned byte """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         return struct.unpack('B', self.f.read(1))[0]
-        
+    
+    def writeUI8(self, file, value):
+        """ Write an unsigned byte."""
+        self.reset_bits_pending()
+        write_byte = struct.pack('B', value)
+        file.write(write_byte)
+    
     def readSI16(self):
         """ Read a signed short """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         return struct.unpack('h', self.f.read(2))[0]
+
+    def writeSI16(self, file, value):
+        self.reset_bits_pending()
+        write_bytes = struct.pack('h', value)
+        file.write(write_bytes)
 
     def readUI16(self):
         """ Read a unsigned short """
-        self.reset_bits_pending();
-        return struct.unpack('H', self.f.read(2))[0]    
+        self.reset_bits_pending()
+        return struct.unpack('H', self.f.read(2))[0]
+
+    def writeUI16(self, file, value):
+        self.reset_bits_pending()
+        write_bytes = struct.pack('H', value)
+        file.write(write_bytes)
 
     def readSI32(self):
         """ Read a signed int """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         return struct.unpack('<i', self.f.read(4))[0]
 
     def readUI32(self):
         """ Read a unsigned int """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         return struct.unpack('<I', self.f.read(4))[0]
-
+    
+    def writeUI32(self, file, value):
+        """ Write an unsigned int """
+        self.reset_bits_pending()
+        write_data = struct.pack('<I', value)
+        file.write(write_data)
+    
     def readUI64(self):
         """ Read a uint64_t """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         return struct.unpack('<Q', self.f.read(8))[0]
     
     def readEncodedU32(self):
         """ Read a encoded unsigned int """
-        self.reset_bits_pending();
-        result = self.readUI8();
+        self.reset_bits_pending()
+        result = self.readUI8()
         if result & 0x80 != 0:
             result = (result & 0x7f) | (self.readUI8() << 7)
             if result & 0x4000 != 0:
@@ -168,7 +242,7 @@ class SWFStream(object):
   
     def readFLOAT(self):
         """ Read a float """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         return struct.unpack('f', self.f.read(4))[0]
     
     def readFLOAT16(self):
@@ -200,6 +274,10 @@ class SWFStream(object):
         """ Read a 8.8 fixed value """
         self.reset_bits_pending()
         return self.readSI16() / 256.0
+    
+    def writeFIXED8(self, file, value):
+        self.reset_bits_pending()
+        self.writeSI16(file, value * 256.0)
 
     def readCXFORM(self):
         """ Read a SWFColorTransform """
@@ -243,6 +321,9 @@ class SWFStream(object):
         r = SWFRectangle()
         r.parse(self)
         return r
+    
+    def writeRECT(self, file, r):
+        r.save(file, self)
     
     def readSHAPE(self, unit_divisor=20):
         """ Read a SWFShape """
@@ -346,7 +427,7 @@ class SWFStream(object):
         
     def readRGB(self):
         """ Read a RGB color """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         r = self.readUI8()
         g = self.readUI8()
         b = self.readUI8()
@@ -354,7 +435,7 @@ class SWFStream(object):
         
     def readRGBA(self):
         """ Read a RGBA color """
-        self.reset_bits_pending();
+        self.reset_bits_pending()
         r = self.readUI8()
         g = self.readUI8()
         b = self.readUI8()
@@ -464,7 +545,7 @@ class SWFStream(object):
         if tag_length == 0x3f:
             # The SWF10 spec sez that this is a signed int.
             # Shouldn't it be an unsigned int?
-            tag_length = self.readSI32();
+            tag_length = self.readSI32()
         return SWFRecordHeader(tag_type_and_length >> 6, tag_length, self.tell() - pos)
     
     def skip_bytes(self, length):

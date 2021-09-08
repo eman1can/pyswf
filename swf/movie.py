@@ -19,57 +19,80 @@ class SWFHeader(object):
         a = stream.readUI8()
         b = stream.readUI8()
         c = stream.readUI8()
-        if not a in [0x43, 0x46, 0x5A] or b != 0x57 or c != 0x53:
-            # Invalid signature! ('FWS' or 'CWS' or 'ZFS')
-            raise SWFHeaderException("not a SWF file! (invalid signature)")
-
-        self._compressed_zlib = (a == 0x43)
-        self._compressed_lzma = (a == 0x5A)
         self._version = stream.readUI8()
+        
+        if self._version > 0x06:
+            # FWS Uncompressed
+            # CWS Compressed with zlib
+            # ZFS Compressed with lzma
+            if a not in [0x46, 0x43, 0x5A] or b != 0x57 or c != 0x53:
+                raise SWFHeaderException("Invalid SWF Signature!")
+            self._compressed_zlib = (a == 0x43)
+            self._compressed_lzma = (a == 0x5A)
+        else:
+            # FWS Uncompressed
+            # FWC Compressed with zlib
+            # FWZ Compressed with lzma
+            if a != 0x43 or b != 0x57 or c not in [0x53, 0x43, 0x5A]:
+                raise SWFHeaderException("Invalid SWF Signature!")
+            self._compressed_zlib = (c == 0x43)
+            self._compressed_lzma = (c == 0x5A)
+        
         self._file_length = stream.readUI32()
-        if not (self._compressed_zlib or self._compressed_lzma):
-            self._frame_size = stream.readRECT()
-            self._frame_rate = stream.readFIXED8()
-            self._frame_count = stream.readUI16()
-
+    
+    def save(self, file, stream):
+        if self._version > 0x06:
+            if self._compressed_zlib:
+                stream.writeUI8(file, 0x43)
+            elif self._compressed_lzma:
+                stream.writeUI8(file, 0x5A)
+            else:
+                stream.writeUI8(file, 0x46)
+            stream.writeUI8(file, self._version)
+            stream.writeUI32(file, self._file_length)
+    
     @property
     def frame_size(self):
-        """ Return frame size as a SWFRectangle """
         return self._frame_size
+
+    @frame_size.setter
+    def frame_size(self, new_frame_size):
+        self._frame_size = new_frame_size
 
     @property
     def frame_rate(self):
-        """ Return frame rate """
         return self._frame_rate
+
+    @frame_rate.setter
+    def frame_rate(self, new_frame_rate):
+        self._frame_rate = new_frame_rate
 
     @property
     def frame_count(self):
-        """ Return number of frames """
         return self._frame_count
+
+    @frame_count.setter
+    def frame_count(self, new_frame_count):
+        self._frame_count = new_frame_count
                 
     @property
     def file_length(self):
-        """ Return uncompressed file length """
         return self._file_length
                     
     @property
     def version(self):
-        """ Return SWF version """
         return self._version
                 
     @property
     def compressed(self):
-        """ Whether the SWF is compressed """
         return self._compressed_zlib or self._compressed_lzma
 
     @property
     def compressed_zlib(self):
-        """ Whether the SWF is compressed using ZLIB """
         return self._compressed_zlib
 
     @property
     def compressed_lzma(self):
-        """ Whether the SWF is compressed using LZMA """
         return self._compressed_lzma
         
     def __str__(self):
@@ -92,8 +115,9 @@ class SWF(SWFTimelineContainer):
     
     @param file: a file object with read(), seek(), tell() methods.
     """
-    def __init__(self, file=None):
+    def __init__(self, file=None, chunk_size=4096):
         super(SWF, self).__init__()
+        self._chunk_size = 4096
         self._data = None if file is None else SWFStream(file)
         self._header = None
         if self._data is not None:
@@ -132,7 +156,8 @@ class SWF(SWFTimelineContainer):
             
     def parse_file(self, filename):
         """ Parses the SWF from a filename """
-        self.parse(open(filename, 'rb'))
+        with open(filename, 'rb') as file:
+            self.parse(SWFStream(file))
         
     def parse(self, data):
         """ 
@@ -140,27 +165,84 @@ class SWF(SWFTimelineContainer):
         
         The @data parameter can be a file object or a SWFStream
         """
-        self._data = data = data if isinstance(data, SWFStream) else SWFStream(data)
+        self._data = data if isinstance(data, SWFStream) else SWFStream(data)
         self._header = SWFHeader(self._data)
         if self._header.compressed:
-            temp = BytesIO()
             if self._header.compressed_zlib:
-                import zlib
-                data = data.f.read()
-                zip = zlib.decompressobj()
-                temp.write(zip.decompress(data))
+                self._data = SWFStream(self.decompress_zlib())
             else:
-                import pylzma
-                data.readUI32() #consume compressed length
-                data = data.f.read()
-                temp.write(pylzma.decompress(data))
-            temp.seek(0)
-            data = SWFStream(temp)
-        self._header._frame_size = data.readRECT()
-        self._header._frame_rate = data.readFIXED8()
-        self._header._frame_count = data.readUI16()
-        self.parse_tags(data)
+                self._data = SWFStream(self.decompress_lzma())
+        self._header.frame_size = self._data.readRECT()
+        self._header.frame_rate = self._data.readFIXED8()
+        self._header.frame_count = self._data.readUI16()
+        # self.parse_tags(self._data)
+    
+    def save_file(self, filename):
+        with open(filename, 'wb') as file:
+            self.save(file)
+    
+    def save(self, file):
+        self._header.save(file, self._data)
+        if self._header.compressed():
+            output_buffer = BytesIO()
+        else:
+            output_buffer = file
         
+        self._data.writeRECT(output_buffer, self._header.frame_size)
+        self._data.writeFIXED8(output_buffer, self._header.frame_rate)
+        self._data.writeUI16(output_buffer, self._header.frame_count)
+        
+        self.save_tags(self._data, output_buffer)
+        
+        if self._header.compressed():
+            if self._header.compressed_zlib():
+                output_buffer = self.compress_zlib(output_buffer)
+            else:
+                output_buffer = self.compress_lzma(output_buffer)
+            
+            data_chunk = output_buffer.read(self._chunk_size)
+            while data_chunk:
+                file.write(data_chunk)
+                data_chunk.read(self._chunk_size)
+    
+    def decompress_zlib(self):
+        from zlib import decompressobj
+        decompress_method = decompressobj()
+        return self.decompress(decompress_method, self._data.f)
+    
+    def decompress_lzma(self):
+        from pylzma import decompress
+        return self.decompress(decompress, self._data.f)
+    
+    def decompress(decompress_method, input_buffer):
+        data_chunk = input_buffer.read(self._chunk_size)
+        output_buffer = BytesIO()
+        while data_chunk:
+            data = decompress_method(data_chunk)
+            output_buffer.write(data)
+            data_chunk = input_buffer.read(self._chunk_size)
+        output_buffer.seek(0)
+        return output_buffer
+    
+    def compress(compress_method, input_buffer):
+        data_chunk = input_buffer.read(self._chunk_size)
+        output_buffer = BytesIO()
+        while data_chunk:
+            data = compress_method(data_chunk)
+            output_buffer.write(data)
+            data_chunk = input_buffer.read(self._chunk_size)
+        output_buffer.seek(0)
+        return output_buffer
+    
+    def compress_zlib(self, input_buffer):
+        from zlib import compressobj
+        compress_method = compressobj()
+        return self.compress(compress_method, input_buffer)
+    
+    def compress_lzma(self, input_buffer):
+        from pylzma import compress
+        return self.compress(compress, input_buffer)
+    
     def __str__(self):
         s = "[SWF]\n"
         s += self._header.__str__()
